@@ -1,0 +1,42 @@
+# IndexTTS-2.5 ComfyUI 节点运行依赖
+# 注意：官方 pyproject 里的 keras==2.9.0 为历史遗留依赖，
+# IndexTTS-2.5 推理链路并不 import keras，因此此处不安装。
+
+torch>=2.6.0
+torchaudio>=2.6.0
+transformers>=4.50.0
+tokenizers>=0.21.0
+accelerate>=1.8.0
+safetensors>=0.4.3
+huggingface_hub>=0.23.0
+
+numpy>=1.24.0
+librosa>=0.10.2
+soundfile>=0.10.0
+scipy>=1.10.0
+
+omegaconf>=2.3.0
+einops>=0.8.1
+sentencepiece>=0.2.1
+tiktoken>=0.5.0
+openai-whisper>=20231117
+
+modelscope>=1.27.0
+munch>=4.0.0
+pandas>=2.0.0
+matplotlib>=3.5.0
+numba>=0.58.0
+json5>=0.9.16
+textstat>=0.7.10
+jieba>=0.42.1
+cn2an>=0.5.22
+g2p-en>=2.1.0
+ffmpeg-python>=0.2.0
+descript-audiotools>=0.7.2
+PyYAML>=6.0
+
+# Windows 文本正则（中文数字/符号归一化）
+wetext>=0.0.9
+# 可选：日语假名注音（仅日语 TTS 需要）
+# fugashi>=1.2.0
+# unidic-lite>=1.0.0
