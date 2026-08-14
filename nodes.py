@@ -31,15 +31,35 @@ class IndexTTS2_5Node:
             },
             "optional": {
                 # 情感参考音频（可选）
-                "emo_ref_audio": ("AUDIO",),
-                "emo_alpha": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "emo_ref_audio": ("AUDIO", {
+                    "tooltip": "情感参考音频：用一段带目标情绪的语音引导合成情感。\n提供 emo_vector 或 emo_text 后此输入会被忽略。",
+                }),
+                "emo_alpha": ("FLOAT", {
+                    "default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "情感强度（0~1）：对 emo_vector 做整体缩放；\n或控制情感参考音频与说话人音色的混合比例。",
+                }),
                 # 情感向量（可选）：8 维，逗号或 JSON 数组，顺序见 EMO_ORDER
-                "emo_vector": ("STRING", {"multiline": False, "default": ""}),
-                # 情感文本（可选）：需要 use_qwen_emo=True 才会生效
-                "emo_text": ("STRING", {"multiline": True, "default": ""}),
-                "use_emo_text": ("BOOLEAN", {"default": False}),
-                "use_qwen_emo": ("BOOLEAN", {"default": False}),
-                "use_random": ("BOOLEAN", {"default": False}),
+                "emo_vector": ("STRING", {
+                    "multiline": False, "default": "",
+                    "tooltip": "8 维情感向量，顺序固定：高兴/愤怒/悲伤/恐惧/反感/低落/惊讶/自然。\n逗号分隔或 JSON 数组，如 0.8,0,0,0,0,0,0,0 或 [0,0,0,0,0,0,0,1]（自然）。\n必须恰好 8 个数字，否则忽略；提供后覆盖 emo_ref_audio。",
+                }),
+                # 情感文本（可选）：非空即自动启用（自动加载 QwenEmotion）
+                "emo_text": ("STRING", {
+                    "multiline": True, "default": "",
+                    "tooltip": "情感文本：用自然语言描述情绪（如「高兴」「悲伤」「愤怒」），由 QwenEmotion 自动转为情感向量。\n非空即自动启用，需 qwen0.6bemo4-merge 模型；提供后覆盖 emo_ref_audio。",
+                }),
+                "use_emo_text": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "使用情感文本。emo_text 非空时自动启用，无需单独勾选。",
+                }),
+                "use_qwen_emo": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "加载 QwenEmotion 情感模型（仅情感文本需要；使用 emo_text 时自动加载）。",
+                }),
+                "use_random": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "随机情感：随机挑选情感参考向量（需同时提供 emo_vector 或 emo_text 才生效）。",
+                }),
                 # 采样参数
                 "do_sample": ("BOOLEAN", {"default": True}),
                 "temperature": ("FLOAT", {"default": 0.8, "min": 0.1, "max": 2.0, "step": 0.05}),
