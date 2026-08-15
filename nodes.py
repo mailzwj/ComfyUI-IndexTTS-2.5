@@ -253,3 +253,51 @@ class IndexTTS2_5Node:
         print(f"[IndexTTS-2.5] 完成，时长 {wave_tensor.shape[-1] / sr:.2f}s")
 
         return (audio_dict, seed, subtitle)
+
+
+class EmoSettingsNode:
+    """8 维情感向量配置节点。
+
+    将 8 种情绪作为可调滑块（0~1）展示，输出一个与 ``IndexTTS2_5Node`` 的
+    ``emo_vector`` 输入兼容的逗号分隔字符串，可直接连线使用。
+    """
+
+    # 与 IndexTTS2_5Node.EMO_ORDER 保持同一顺序
+    EMO_ORDER = IndexTTS2_5Node.EMO_ORDER
+    EMO_LABELS = {
+        "happy": "高兴",
+        "angry": "愤怒",
+        "sad": "悲伤",
+        "afraid": "恐惧",
+        "disgusted": "反感",
+        "melancholic": "低落",
+        "surprised": "惊讶",
+        "calm": "自然",
+    }
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        required = {
+            name: (
+                "FLOAT",
+                {
+                    "default": 0.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.05,
+                    "tooltip": f"{cls.EMO_LABELS[name]}（{name}）：情感强度，范围 0~1。",
+                },
+            )
+            for name in cls.EMO_ORDER
+        }
+        return {"required": required}
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("emo_vector",)
+    FUNCTION = "build_emo_vector"
+    CATEGORY = "audio"
+
+    def build_emo_vector(self, happy, angry, sad, afraid, disgusted, melancholic, surprised, calm):
+        """按 EMO_ORDER 顺序拼成逗号分隔字符串，供 emo_vector 使用。"""
+        values = [happy, angry, sad, afraid, disgusted, melancholic, surprised, calm]
+        return (",".join(f"{float(v):g}" for v in values),)

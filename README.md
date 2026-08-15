@@ -10,6 +10,10 @@ IndexTTS-2.5 的 ComfyUI 自定义节点。零样本文本转语音，支持中�
   - 可选情感控制：`emo_ref_audio` / `emo_vector`（8 维）/ `emo_text`（需 QwenEmotion）
   - 采样参数：`do_sample` / `temperature` / `top_p` / `top_k` / `repetition_penalty` 等
   - 输出：`audio`（AUDIO）、`seed`、`subtitle`
+- **Emo Settings**（`EmoSettingsNode`）
+  - 8 个情感滑块：`happy` / `angry` / `sad` / `afraid` / `disgusted` / `melancholic` / `surprised` / `calm`，范围 0~1
+  - 输出：`emo_vector`（STRING，逗号分隔的 8 维向量）
+  - 连线到 `Index TTS 2.5` 的 `emo_vector` 输入即可，无需手写向量字符串
 
 ### 工作流预览
 
@@ -56,6 +60,9 @@ IndexTTS-2.5 的 ComfyUI 自定义节点。零样本文本转语音，支持中�
 - 愤怒：`0,0.9,0,0,0,0,0,0`
 - 悲伤：`0,0,0.8,0,0,0,0,0`
 - 自然：`0,0,0,0,0,0,0,1`
+
+> 也可用 **Emo Settings** 节点：8 个滑块（0~1）可视化调节情绪，输出即 `emo_vector`，
+> 直接连线到 `Index TTS 2.5` 的 `emo_vector` 输入，免去手写字符串。
 
 #### emo_text（情感文本）
 
