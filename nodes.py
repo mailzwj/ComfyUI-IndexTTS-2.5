@@ -4,13 +4,14 @@
 （indextts.infer_v2_5.IndexTTS2.infer）。
 """
 import json
+import os
 import re
 import random
 
 import numpy as np
 import torch
 
-from .model_loader import IndexTTS2_5Loader
+from .model_loader import get_shared_loader
 
 
 class IndexTTS2_5Node:
@@ -71,6 +72,13 @@ class IndexTTS2_5Node:
                 "max_mel_tokens": ("INT", {"default": 1500, "min": 50, "max": 1815, "step": 5}),
                 # 模型加载
                 "use_bf16": ("BOOLEAN", {"default": True}),
+                "auto_free_memory": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "生成完成后自动回收内存/显存（卸载整套 IndexTTS-2.5 模型并执行 gc + CUDA empty_cache）。\n"
+                               "勾选后：本次生成结束即释放，下次生成需重新加载模型（约 10~60 秒），\n"
+                               "适合需要把显存腾给图像/视频等其它模型的场景；\n"
+                               "不勾选（默认）：模型常驻 GPU，连续多次生成更快。",
+                }),
             },
         }
 
@@ -80,7 +88,9 @@ class IndexTTS2_5Node:
     CATEGORY = "audio"
 
     def __init__(self):
-        self.loader = IndexTTS2_5Loader()
+        # 使用进程级共享加载器：同一工作流中多个节点复用同一模型实例，
+        # 避免重复加载整套模型导致显存成倍增长。
+        self.loader = get_shared_loader()
 
     # ---- 输入处理 ----------------------------------------------------------
     @staticmethod
@@ -181,6 +191,7 @@ class IndexTTS2_5Node:
         num_beams=3,
         max_mel_tokens=1500,
         use_bf16=True,
+        auto_free_memory=False,
     ):
         text = (text or "").strip()
         if not text:
@@ -194,65 +205,78 @@ class IndexTTS2_5Node:
         if emo_ref_audio is not None:
             emo_path = self.loader.save_temp_wav(self._process_audio_input(emo_ref_audio))
 
-        emo_vec = self._parse_emo_vector(emo_vector)
-        use_emo_text = bool(use_emo_text) or bool((emo_text or "").strip())
+        try:
+            emo_vec = self._parse_emo_vector(emo_vector)
+            use_emo_text = bool(use_emo_text) or bool((emo_text or "").strip())
 
-        # 需要 QwenEmotion 时自动加载
-        load_qwen = bool(use_qwen_emo) or use_emo_text
+            # 需要 QwenEmotion 时自动加载
+            load_qwen = bool(use_qwen_emo) or use_emo_text
 
-        # 设置随机种子（seed=0 时不固定，沿用全局状态）
-        if seed != 0:
-            random.seed(seed)
-            np.random.seed(seed)
-            torch.manual_seed(seed)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(seed)
+            # 设置随机种子（seed=0 时不固定，沿用全局状态）
+            if seed != 0:
+                random.seed(seed)
+                np.random.seed(seed)
+                torch.manual_seed(seed)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(seed)
 
-        tts = self.loader.get_tts(use_bf16=use_bf16, use_qwen_emo=load_qwen)
+            tts = self.loader.get_tts(use_bf16=use_bf16, use_qwen_emo=load_qwen)
 
-        print(f"[IndexTTS-2.5] 开始推理 text_len={len(text)} lang={language} "
-              f"duration_factor={duration_factor} seed={seed}")
+            print(f"[IndexTTS-2.5] 开始推理 text_len={len(text)} lang={language} "
+                  f"duration_factor={duration_factor} seed={seed}")
 
-        result = tts.infer(
-            spk_audio_prompt=spk_path,
-            text=text,
-            output_path=None,
-            lang=language,
-            emo_audio_prompt=emo_path,
-            emo_alpha=float(emo_alpha),
-            emo_vector=emo_vec,
-            use_emo_text=use_emo_text,
-            emo_text=(emo_text.strip() or None) if use_emo_text else None,
-            use_random=bool(use_random),
-            duration_factor=float(duration_factor),
-            # 采样参数通过 generation_kwargs 传入
-            do_sample=bool(do_sample),
-            temperature=float(temperature),
-            top_p=float(top_p),
-            top_k=int(top_k),
-            repetition_penalty=float(repetition_penalty),
-            length_penalty=float(length_penalty),
-            num_beams=int(num_beams),
-            max_mel_tokens=int(max_mel_tokens),
-        )
+            result = tts.infer(
+                spk_audio_prompt=spk_path,
+                text=text,
+                output_path=None,
+                lang=language,
+                emo_audio_prompt=emo_path,
+                emo_alpha=float(emo_alpha),
+                emo_vector=emo_vec,
+                use_emo_text=use_emo_text,
+                emo_text=(emo_text.strip() or None) if use_emo_text else None,
+                use_random=bool(use_random),
+                duration_factor=float(duration_factor),
+                # 采样参数通过 generation_kwargs 传入
+                do_sample=bool(do_sample),
+                temperature=float(temperature),
+                top_p=float(top_p),
+                top_k=int(top_k),
+                repetition_penalty=float(repetition_penalty),
+                length_penalty=float(length_penalty),
+                num_beams=int(num_beams),
+                max_mel_tokens=int(max_mel_tokens),
+            )
 
-        if result is None:
-            raise RuntimeError("IndexTTS-2.5 推理返回空结果")
+            if result is None:
+                raise RuntimeError("IndexTTS-2.5 推理返回空结果")
 
-        sr, wav = result
-        sr = int(sr)
-        wav = np.asarray(wav)
-        if wav.ndim == 2:
-            wav = wav[:, 0]  # [T, C] -> [T]
-        # int16 -> float32 [-1, 1]
-        wav_f = (wav.astype(np.float32) / 32768.0).clip(-1.0, 1.0)
-        wave_tensor = torch.tensor(wav_f, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+            sr, wav = result
+            sr = int(sr)
+            wav = np.asarray(wav)
+            if wav.ndim == 2:
+                wav = wav[:, 0]  # [T, C] -> [T]
+            # int16 -> float32 [-1, 1]
+            wav_f = (wav.astype(np.float32) / 32768.0).clip(-1.0, 1.0)
+            wave_tensor = torch.tensor(wav_f, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
 
-        audio_dict = {"waveform": wave_tensor, "sample_rate": sr}
-        subtitle = self._make_subtitle(text, wave_tensor.shape[-1] / sr)
-        print(f"[IndexTTS-2.5] 完成，时长 {wave_tensor.shape[-1] / sr:.2f}s")
+            audio_dict = {"waveform": wave_tensor, "sample_rate": sr}
+            subtitle = self._make_subtitle(text, wave_tensor.shape[-1] / sr)
+            print(f"[IndexTTS-2.5] 完成，时长 {wave_tensor.shape[-1] / sr:.2f}s")
 
-        return (audio_dict, seed, subtitle)
+            # 生成成功后按需释放模型（归还内存/显存给 ComfyUI 其它节点）
+            if auto_free_memory:
+                self.loader.release()
+
+            return (audio_dict, seed, subtitle)
+        finally:
+            # 清理临时 wav，避免系统临时目录堆积
+            for path in (spk_path, emo_path):
+                if path and os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
 
 
 class EmoSettingsNode:

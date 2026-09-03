@@ -9,6 +9,7 @@ import os
 import gc
 import sys
 import tempfile
+import threading
 
 import numpy as np
 import torch
@@ -22,6 +23,7 @@ class IndexTTS2_5Loader:
     - 解析模型目录（models/TTS/IndexTTS-2.5）
     - 校验必需文件
     - 将 vendored 源码挂到 sys.path 并惰性构造 IndexTTS2
+    - release() 释放全部缓存模型，归还内存/显存
     """
 
     DEFAULT_DIRNAME = "IndexTTS-2.5"
@@ -43,8 +45,12 @@ class IndexTTS2_5Loader:
         self._models_root = models_root or self._default_models_root()
         # 模型放在 models/TTS/ 下
         self._model_dir = os.path.join(self._models_root, "TTS", self.DEFAULT_DIRNAME)
+        # 用户显式指定的 device（None 表示交给 IndexTTS2 自动探测 cuda/xpu/mps/cpu）
+        self._device_requested = device
         self._device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self._cache = {}
+        # 保护 _cache 的并发访问（ComfyUI 多 prompt 并发执行时避免重复加载）
+        self._lock = threading.Lock()
         # vendored 源码根目录：<node>/indextts
         self._node_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -76,41 +82,109 @@ class IndexTTS2_5Loader:
     def get_tts(self, use_bf16=True, use_qwen_emo=False):
         """返回缓存的 IndexTTS2 实例（按关键参数区分缓存）。"""
         key = ("tts", bool(use_bf16), bool(use_qwen_emo))
-        if key in self._cache:
-            return self._cache[key]
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
 
-        self.validate()
+        with self._lock:
+            # 双检：并发下可能已有其它线程完成加载
+            cached = self._cache.get(key)
+            if cached is not None:
+                return cached
 
-        # 让 vendored 的 `indextts` 包可被 import（放在 sys.path 最前）
-        if self._node_dir not in sys.path:
-            sys.path.insert(0, self._node_dir)
-        elif sys.path.index(self._node_dir) != 0:
-            sys.path.remove(self._node_dir)
-            sys.path.insert(0, self._node_dir)
+            self.validate()
 
-        # 清除旧的 indextts 模块，避免与其它 vendored 版本冲突
-        for k in list(sys.modules.keys()):
-            if k == "indextts" or k.startswith("indextts."):
-                del sys.modules[k]
+            # 让 vendored 的 `indextts` 包可被 import（放在 sys.path 最前）
+            if self._node_dir not in sys.path:
+                sys.path.insert(0, self._node_dir)
+            elif sys.path.index(self._node_dir) != 0:
+                sys.path.remove(self._node_dir)
+                sys.path.insert(0, self._node_dir)
+
+            # 清除旧的 indextts 模块，避免与其它 vendored 版本冲突
+            for k in list(sys.modules.keys()):
+                if k == "indextts" or k.startswith("indextts."):
+                    del sys.modules[k]
+            gc.collect()
+
+            from indextts.infer_v2_5 import IndexTTS2  # noqa: E402
+
+            on_cuda = self._device.startswith("cuda")
+            tts = IndexTTS2(
+                cfg_path=os.path.join(self._model_dir, "config.yaml"),
+                model_dir=self._model_dir,
+                # None → 由 IndexTTS2 自动探测设备（保持原有行为）；显式指定时尊重之
+                device=self._device_requested,
+                use_bf16=bool(use_bf16) and on_cuda,
+                # 保守起见默认关闭 CUDA kernel / flash-attn 加速，
+                # 避免 torch2.9+cu130 下预编译扩展 ABI 不匹配；需要可再开启。
+                use_cuda_kernel=False,
+                use_deepspeed=False,
+                use_accel=False,
+                use_torch_compile=False,
+                use_qwen_emo=bool(use_qwen_emo),
+            )
+            self._cache[key] = tts
+            return tts
+
+    def release(self):
+        """释放全部缓存的 IndexTTS2 实例，归还内存/显存。
+
+        - 从缓存中移除所有 TTS 实例并显式断开其大子模型引用（帮助 GC 回收循环引用）；
+        - gc.collect() 回收 Python 层内存；
+        - torch.cuda.empty_cache()（或 MPS 对应接口）把 PyTorch 缓存分配器
+          预留的显存真正归还给系统，供 ComfyUI 中其它模型使用。
+
+        释放后下次 get_tts() 会重新加载模型（有首次加载耗时）。
+        """
+        with self._lock:
+            released = list(self._cache.values())
+            self._cache.clear()
+
+        if not released:
+            return
+
+        for tts in released:
+            self._drop_tts_refs(tts)
+
         gc.collect()
+        freed_vram_gb = None
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                free, total = torch.cuda.mem_get_info()
+                freed_vram_gb = (total - free) / (1024 ** 3)
+            except Exception as e:  # noqa: BLE001 - 释放尽力而为，不阻断主流程
+                print(f"[IndexTTS-2.5] CUDA 显存回收失败（忽略）: {e!r}")
+        elif hasattr(torch, "mps") and torch.backends.mps.is_available():
+            try:
+                torch.mps.empty_cache()
+            except Exception as e:  # noqa: BLE001
+                print(f"[IndexTTS-2.5] MPS 显存回收失败（忽略）: {e!r}")
 
-        from indextts.infer_v2_5 import IndexTTS2  # noqa: E402
+        if freed_vram_gb is not None:
+            print(f"[IndexTTS-2.5] 已释放模型，当前 GPU 占用约 {freed_vram_gb:.2f} GB")
+        else:
+            print("[IndexTTS-2.5] 已释放模型（CPU 模式），内存已交还系统")
 
-        on_cuda = self._device.startswith("cuda")
-        tts = IndexTTS2(
-            cfg_path=os.path.join(self._model_dir, "config.yaml"),
-            model_dir=self._model_dir,
-            use_bf16=bool(use_bf16) and on_cuda,
-            # 保守起见默认关闭 CUDA kernel / flash-attn 加速，
-            # 避免 torch2.9+cu130 下预编译扩展 ABI 不匹配；需要可再开启。
-            use_cuda_kernel=False,
-            use_deepspeed=False,
-            use_accel=False,
-            use_torch_compile=False,
-            use_qwen_emo=bool(use_qwen_emo),
+    @staticmethod
+    def _drop_tts_refs(tts) -> None:
+        """显式断开 IndexTTS2 内部大对象引用，帮助 GC 及时回收。"""
+        attrs = (
+            "gpt", "semantic_model", "semantic_codec", "s2mel",
+            "campplus_model", "bigvgan", "qwen_emo",
+            "emo_matrix", "spk_matrix",
+            # infer 过程中按参考音频缓存的中间张量
+            "cache_spk_cond", "cache_s2mel_style", "cache_s2mel_prompt",
+            "cache_emo_cond", "cache_mel",
         )
-        self._cache[key] = tts
-        return tts
+        for attr in attrs:
+            try:
+                if hasattr(tts, attr):
+                    setattr(tts, attr, None)
+            except Exception:  # noqa: BLE001 - 单个属性失败不影响整体释放
+                pass
 
     @staticmethod
     def save_temp_wav(audio) -> str:
@@ -124,3 +198,22 @@ class IndexTTS2_5Loader:
         os.close(fd)
         sf.write(path, wave, int(sr))
         return path
+
+
+# ---- 进程级共享加载器 -------------------------------------------------------
+_shared_loader = None
+_shared_loader_lock = threading.Lock()
+
+
+def get_shared_loader(models_root=None, device=None) -> IndexTTS2_5Loader:
+    """返回进程内共享的加载器单例。
+
+    ComfyUI 会为工作流中每个节点实例分别构造类对象；若各自持有独立 loader，
+    同一张图里放多个 IndexTTS 节点会重复加载整套模型（显存成倍增长）。
+    共享后：相同参数的节点复用同一模型实例，release() 也能一次性全部释放。
+    """
+    global _shared_loader
+    with _shared_loader_lock:
+        if _shared_loader is None:
+            _shared_loader = IndexTTS2_5Loader(models_root=models_root, device=device)
+        return _shared_loader
