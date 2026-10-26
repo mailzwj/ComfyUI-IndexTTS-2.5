@@ -1,75 +1,26 @@
-"""内存/显存释放逻辑的单元测试（不加载真实模型，用桩对象验证行为）。
+"""内存/显存释放逻辑与节点主链路的单元测试（不加载真实模型，用桩对象验证行为）。
 
 运行方式（任选其一）：
     python tests/test_memory_release.py
     pytest tests/test_memory_release.py -v
 """
 import gc
-import importlib.util
 import os
 import sys
-import types
 import unittest
 from unittest import mock
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from _bootstrap import (ROOT, ML, NODES, FakeTTS, make_loader,  # noqa: E402
+                        make_fake_loader)
 
-def _load_pkg():
-    """custom node 目录名含 '-'，不是合法包名，手工挂载为 it25 包。"""
-    if "it25" in sys.modules:
-        return sys.modules["it25"]
-    pkg = types.ModuleType("it25")
-    pkg.__path__ = [ROOT]
-    sys.modules["it25"] = pkg
-    for name in ("model_loader", "nodes"):
-        spec = importlib.util.spec_from_file_location(
-            f"it25.{name}", os.path.join(ROOT, f"{name}.py")
-        )
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules[f"it25.{name}"] = mod
-        spec.loader.exec_module(mod)
-        setattr(pkg, name, mod)  # 模拟正常包导入：子模块挂到包属性上
-    return pkg
-
-
-PKG = _load_pkg()
-ML = PKG.model_loader
-NODES = PKG.nodes
-
-import numpy as np  # noqa: E402
 import torch  # noqa: E402
-
-
-class FakeTTS:
-    """模拟 IndexTTS2：持有大张量（模拟模型权重），infer 返回 (sr, wav)。"""
-
-    def __init__(self):
-        self.gpt = mock.MagicMock()
-        self.semantic_model = mock.MagicMock()
-        self.semantic_codec = mock.MagicMock()
-        self.s2mel = mock.MagicMock()
-        self.campplus_model = mock.MagicMock()
-        self.bigvgan = mock.MagicMock()
-        self.qwen_emo = None
-        self.emo_matrix = torch.zeros(8, 16)
-        self.spk_matrix = torch.zeros(8, 16)
-        self.cache_spk_cond = torch.zeros(4, 4)
-        # ~200MB CPU 张量，模拟真实模型占用的内存
-        self._ballast = torch.zeros(50 * 1024 * 1024 // 4)
-
-    def infer(self, **kwargs):
-        return 22050, np.zeros(22050, dtype=np.int16)
-
-
-def _make_loader():
-    # models_root 传 ROOT 仅为构造合法对象；get_tts 会被 mock，不会真正校验/加载
-    return ML.IndexTTS2_5Loader(models_root=ROOT, device="cpu")
 
 
 class TestLoaderRelease(unittest.TestCase):
     def test_release_clears_cache_and_drops_refs(self):
-        loader = _make_loader()
+        loader = make_loader()
         fake = FakeTTS()
         loader._cache[("tts", True, False)] = fake
 
@@ -85,7 +36,7 @@ class TestLoaderRelease(unittest.TestCase):
         gc.collect()
 
     def test_release_calls_cuda_empty_cache_when_available(self):
-        loader = _make_loader()
+        loader = make_loader()
         fake = FakeTTS()
         loader._cache[("tts", True, False)] = fake
 
@@ -100,26 +51,77 @@ class TestLoaderRelease(unittest.TestCase):
         self.assertEqual(loader._cache, {})
 
     def test_release_without_cache_is_noop(self):
-        loader = _make_loader()
+        loader = make_loader()
         with mock.patch.object(torch.cuda, "is_available", return_value=True), \
              mock.patch.object(torch.cuda, "empty_cache") as ec:
             loader.release()
         self.assertFalse(ec.called)
 
     def test_get_tts_returns_same_cached_instance(self):
-        loader = _make_loader()
+        loader = make_loader()
         fake = FakeTTS()
         # 直接走缓存命中路径（不触发真实加载）
         loader._cache[("tts", True, False)] = fake
-        self.assertIs(loader.get_tts(use_bf16=True, use_qwen_emo=False), fake)
+        with mock.patch.object(ML.IndexTTS2_5Loader, "_bf16_supported", lambda self: True):
+            self.assertIs(loader.get_tts(use_bf16=True, use_qwen_emo=False), fake)
 
     def test_get_tts_cache_key_distinguishes_params(self):
-        loader = _make_loader()
+        loader = make_loader()
         f1, f2 = FakeTTS(), FakeTTS()
         loader._cache[("tts", True, False)] = f1
         loader._cache[("tts", False, False)] = f2
-        self.assertIs(loader.get_tts(use_bf16=True), f1)
-        self.assertIs(loader.get_tts(use_bf16=False), f2)
+        with mock.patch.object(ML.IndexTTS2_5Loader, "_bf16_supported", lambda self: True):
+            self.assertIs(loader.get_tts(use_bf16=True), f1)
+            self.assertIs(loader.get_tts(use_bf16=False), f2)
+
+    def test_sampling_rate_prefers_model_config(self):
+        # 桩对象没有 cfg -> 退回上游默认的 22050
+        self.assertEqual(ML.IndexTTS2_5Loader.sampling_rate(FakeTTS()), 22050)
+
+        class WithCfg:
+            cfg = {"s2mel": {"preprocess_params": {"sr": 44100}}}
+
+        self.assertEqual(ML.IndexTTS2_5Loader.sampling_rate(WithCfg()), 44100)
+
+
+class TestBf16CapabilityGuard(unittest.TestCase):
+    """bf16 需要 Ampere（sm_80）及以上；老卡必须自动降级为 fp32。"""
+
+    def _loader(self, device):
+        return make_loader(device)
+
+    def test_cpu_and_mps_are_not_bf16(self):
+        for device in ("cpu", "mps", "xpu"):
+            with self.subTest(device=device):
+                self.assertFalse(self._loader(device)._bf16_supported())
+
+    def test_capability_matrix(self):
+        cases = {(7, 0): False, (7, 5): False, (8, 0): True, (8, 6): True, (12, 0): True}
+        loader = self._loader("cuda")
+        for cap, expected in cases.items():
+            with mock.patch.object(torch.cuda, "get_device_capability", return_value=cap):
+                self.assertIs(loader._bf16_supported(), expected, f"sm_{cap[0]}{cap[1]}")
+
+    def test_uses_requested_device_index(self):
+        loader = self._loader("cuda:1")
+        with mock.patch.object(torch.cuda, "get_device_capability",
+                               return_value=(8, 6)) as gdc:
+            self.assertTrue(loader._bf16_supported())
+        gdc.assert_called_once_with(1)
+
+    def test_capability_query_failure_falls_back_to_fp32(self):
+        loader = self._loader("cuda")
+        with mock.patch.object(torch.cuda, "get_device_capability",
+                               side_effect=RuntimeError("no device")):
+            self.assertFalse(loader._bf16_supported())
+
+    def test_cache_key_uses_downgraded_value(self):
+        """老卡上 True/False 应命中同一份 fp32 模型，不能各加载一遍。"""
+        loader = self._loader("cuda")
+        fake = FakeTTS()
+        loader._cache[("tts", False, False)] = fake
+        with mock.patch.object(torch.cuda, "get_device_capability", return_value=(7, 5)):
+            self.assertIs(loader.get_tts(use_bf16=True), fake)
 
 
 class TestSharedLoader(unittest.TestCase):
@@ -147,12 +149,10 @@ class TestNodeGenerate(unittest.TestCase):
         }
 
     def _mock_loader(self, tts):
-        """mock loader：save_temp_wav 走真实实现（产生真实临时文件），get_tts 返回桩。"""
-        mock_loader = mock.MagicMock()
-        mock_loader.save_temp_wav.side_effect = ML.IndexTTS2_5Loader.save_temp_wav
-        mock_loader.get_tts.return_value = tts
-        self.node.loader = mock_loader
-        return mock_loader
+        """mock loader：save_temp_wav / sampling_rate 走真实实现，get_tts 返回桩。"""
+        loader = make_fake_loader(tts)
+        self.node.loader = loader
+        return loader
 
     def _call(self, **kw):
         defaults = dict(text="你好，测试。", reference_audio=self.ref_audio)
@@ -168,17 +168,33 @@ class TestNodeGenerate(unittest.TestCase):
 
     def test_generate_releases_when_enabled(self):
         mock_loader = self._mock_loader(FakeTTS())
-        out = self._call(auto_free_memory=True)
-        audio, seed, subtitle = out
+        audio, seed, subtitle = self._call(auto_free_memory=True)
         self.assertEqual(mock_loader.get_tts.call_count, 1)
         self.assertEqual(mock_loader.release.call_count, 1)
         self.assertEqual(audio["sample_rate"], 22050)
         self.assertTrue(audio["waveform"].numel() > 0)
+        self.assertEqual(seed, 0)
 
     def test_generate_no_release_when_disabled(self):
         mock_loader = self._mock_loader(FakeTTS())
         self._call(auto_free_memory=False)
         self.assertEqual(mock_loader.release.call_count, 0)
+
+    def test_generate_passes_stream_options(self):
+        tts = FakeTTS()
+        self._mock_loader(tts)
+        self._call(emo_vector="0.8,0,0,0,0,0,0,0", interval_silence=0,
+                   max_text_tokens_per_segment=60, text_normalization=False,
+                   emo_text="高兴")
+        self.assertEqual(len(tts.infer_options), 1)
+        options = tts.infer_options[0]
+        self.assertEqual(options["max_text_tokens_per_segment"], 60)
+        self.assertFalse(options["text_normalization"])
+        self.assertEqual(options["emo_vector"], [0.8, 0, 0, 0, 0, 0, 0, 0])
+        self.assertTrue(options["use_emo_text"])
+        # 段间静音由节点统一插入，因此上游固定收到 0，且走流式
+        self.assertEqual(options["interval_silence"], 0)
+        self.assertTrue(options["stream_return"])
 
     def test_temp_files_cleaned_on_success(self):
         mock_loader = mock.MagicMock()
@@ -191,6 +207,7 @@ class TestNodeGenerate(unittest.TestCase):
             return p
 
         mock_loader.save_temp_wav.side_effect = spy_save
+        mock_loader.sampling_rate.side_effect = ML.IndexTTS2_5Loader.sampling_rate
         mock_loader.get_tts.return_value = FakeTTS()
         self.node.loader = mock_loader
 
@@ -201,8 +218,9 @@ class TestNodeGenerate(unittest.TestCase):
 
     def test_temp_files_cleaned_on_failure_and_no_release(self):
         class BoomTTS(FakeTTS):
-            def infer(self, **kwargs):
+            def infer_generator(self, **kwargs):
                 raise RuntimeError("boom")
+                yield  # pragma: no cover - 使其保持 generator 形态
 
         mock_loader = self._mock_loader(BoomTTS())
         with self.assertRaises(RuntimeError):

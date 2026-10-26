@@ -53,6 +53,8 @@ class IndexTTS2_5Loader:
         self._lock = threading.Lock()
         # vendored 源码根目录：<node>/indextts
         self._node_dir = os.path.dirname(os.path.abspath(__file__))
+        # glossary.yaml 热重载缓存：(mtime, 解析后的术语字典)
+        self._glossary_cache = None
 
     @staticmethod
     def _default_models_root() -> str:
@@ -79,9 +81,88 @@ class IndexTTS2_5Loader:
                 f"IndexTTS-2.5 模型目录缺少文件 {self._model_dir}: {', '.join(missing)}"
             )
 
+    # ---- 术语表（glossary）--------------------------------------------------
+    @staticmethod
+    def _normalize_glossary(data, source):
+        """校验并规范化术语字典，忽略结构不合法的条目。"""
+        terms = {}
+        if not isinstance(data, dict):
+            return terms
+        for key, value in data.items():
+            if not isinstance(key, str) or not key.strip():
+                print(f"[IndexTTS-2.5] {source}: 术语键不合法，已忽略 -> {key!r}")
+                continue
+            if isinstance(value, str):
+                terms[key] = value
+            elif isinstance(value, dict):
+                readings = {k: v for k, v in value.items() if isinstance(k, str) and isinstance(v, str)}
+                if readings:
+                    terms[key] = readings
+                else:
+                    print(f"[IndexTTS-2.5] {source}: 术语 {key} 的读法不是字符串字典，已忽略")
+            else:
+                print(f"[IndexTTS-2.5] {source}: 术语 {key} 的值类型不支持，已忽略")
+        return terms
+
+    def _read_glossary_file(self):
+        """读取 model_dir/glossary.yaml，按 mtime 缓存解析结果。"""
+        path = os.path.join(self._model_dir, "glossary.yaml")
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return {}, 0.0
+        if self._glossary_cache and self._glossary_cache[0] == mtime:
+            return self._glossary_cache[1], mtime
+        terms = {}
+        try:
+            import yaml
+            with open(path, "r", encoding="utf-8") as f:
+                loaded = yaml.safe_load(f)
+            terms = self._normalize_glossary(loaded, path)
+        except Exception as e:  # noqa: BLE001 - 术语表损坏不应阻断生成
+            print(f"[IndexTTS-2.5] 术语表解析失败（忽略文件内容）: {e!r}")
+        self._glossary_cache = (mtime, terms)
+        return terms, mtime
+
+    def refresh_glossary(self, tts, inline_yaml=""):
+        """把「文件术语 + 节点内联术语」写入运行中的 text_process。
+
+        上游只在模型初始化时读一次 glossary.yaml，模型常驻缓存时改文件不会生效，
+        因此这里按 mtime 重新解析并整体替换（避免上一次运行残留的术语继续生效）。
+        """
+        text_process = getattr(tts, "text_process", None)
+        if text_process is None:
+            return 0
+        base, _ = self._read_glossary_file()
+        inline = {}
+        raw = (inline_yaml or "").strip()
+        if raw:
+            try:
+                import yaml
+                inline = self._normalize_glossary(yaml.safe_load(raw), "节点 glossary_yaml")
+            except Exception as e:  # noqa: BLE001 - 内联 YAML 写错时退回文件术语
+                print(f"[IndexTTS-2.5] 节点内联术语表解析失败（忽略）: {e!r}")
+        merged = dict(base)
+        merged.update(inline)
+        if getattr(tts, "_it25_glossary_state", None) == merged:
+            return len(merged)
+        text_process.term_glossary = merged
+        # 存快照而不是同一个对象，否则外部改写 term_glossary 会被误判成「内容变了」
+        tts._it25_glossary_state = {
+            key: (dict(value) if isinstance(value, dict) else value)
+            for key, value in merged.items()
+        }
+        print(f"[IndexTTS-2.5] 术语表已生效：文件 {len(base)} 条 + 节点 {len(inline)} 条")
+        return len(merged)
+
     def get_tts(self, use_bf16=True, use_qwen_emo=False):
-        """返回缓存的 IndexTTS2 实例（按关键参数区分缓存）。"""
-        key = ("tts", bool(use_bf16), bool(use_qwen_emo))
+        """返回缓存的 IndexTTS2 实例（按关键参数区分缓存）。
+
+        ``use_bf16`` 会按显卡算力自动降级（见 :meth:`_bf16_supported`），缓存 key 用
+        降级后的值，否则老卡上 True/False 会各加载一份完全相同的 fp32 模型。
+        """
+        effective_bf16 = bool(use_bf16) and self._bf16_supported()
+        key = ("tts", effective_bf16, bool(use_qwen_emo))
         cached = self._cache.get(key)
         if cached is not None:
             return cached
@@ -91,6 +172,10 @@ class IndexTTS2_5Loader:
             cached = self._cache.get(key)
             if cached is not None:
                 return cached
+
+            if use_bf16 and not effective_bf16:
+                print(f"[IndexTTS-2.5] {self._device} 不支持 bf16（需 Ampere/sm_80 及以上），"
+                      f"已按 fp32 加载；速度会慢于新卡。")
 
             self.validate()
 
@@ -109,13 +194,12 @@ class IndexTTS2_5Loader:
 
             from indextts.infer_v2_5 import IndexTTS2  # noqa: E402
 
-            on_cuda = self._device.startswith("cuda")
             tts = IndexTTS2(
                 cfg_path=os.path.join(self._model_dir, "config.yaml"),
                 model_dir=self._model_dir,
                 # None → 由 IndexTTS2 自动探测设备（保持原有行为）；显式指定时尊重之
                 device=self._device_requested,
-                use_bf16=bool(use_bf16) and on_cuda,
+                use_bf16=effective_bf16,
                 # 保守起见默认关闭 CUDA kernel / flash-attn 加速，
                 # 避免 torch2.9+cu130 下预编译扩展 ABI 不匹配；需要可再开启。
                 use_cuda_kernel=False,
@@ -126,6 +210,20 @@ class IndexTTS2_5Loader:
             )
             self._cache[key] = tts
             return tts
+
+    # Ampere（sm_80）起才有 bf16 硬件支持；Turing/Pascal/Volta 走 bf16 只会更慢甚至报错。
+    MIN_BF16_CAPABILITY = (8, 0)
+
+    def _bf16_supported(self) -> bool:
+        """当前设备能否安全使用 bf16。"""
+        if not self._device.startswith("cuda"):
+            return False
+        try:
+            index = int(self._device.rsplit(":", 1)[-1]) if ":" in self._device else 0
+            return torch.cuda.get_device_capability(index) >= self.MIN_BF16_CAPABILITY
+        except Exception as e:  # noqa: BLE001 - 问不到算力就按 fp32，宁可慢也不要崩
+            print(f"[IndexTTS-2.5] 读取 GPU 算力失败，按 fp32 加载: {e!r}")
+            return False
 
     def release(self):
         """释放全部缓存的 IndexTTS2 实例，归还内存/显存。
@@ -185,6 +283,15 @@ class IndexTTS2_5Loader:
                     setattr(tts, attr, None)
             except Exception:  # noqa: BLE001 - 单个属性失败不影响整体释放
                 pass
+
+    @staticmethod
+    def sampling_rate(tts) -> int:
+        """输出采样率：读模型配置，失败时退回上游硬编码的 22050。"""
+        try:
+            # OmegaConf 的 DictConfig 与普通 dict 都支持下标访问
+            return int(tts.cfg["s2mel"]["preprocess_params"]["sr"])
+        except Exception:  # noqa: BLE001 - 配置结构变化不应阻断生成
+            return 22050
 
     @staticmethod
     def save_temp_wav(audio) -> str:

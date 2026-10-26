@@ -1,7 +1,7 @@
 [project]
 name = "index-tts-2.5"
 description = "IndexTTS-2.5 的 ComfyUI 自定义节点"
-version = "1.0.3"
+version = "1.1.0"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
 dependencies = [
