@@ -186,6 +186,19 @@ def _fake_infer_module():
     return module
 
 
+class GlossaryAnnotatedTTS(AnnotatedTTS):
+    """模拟上游顺序：normalize 内先做术语替换，其结果再被转成发音标注 token。"""
+
+    def infer_generator(self, **kwargs):
+        text = kwargs.get("text", "")
+        glossary = getattr(self.text_process, "term_glossary", {}) or {}
+        for term, reading in sorted(glossary.items(), key=lambda kv: len(kv[0]), reverse=True):
+            if isinstance(reading, str):
+                text = re.sub(re.escape(term), reading, text, flags=re.IGNORECASE)
+        kwargs["text"] = text
+        return (yield from super().infer_generator(**kwargs))
+
+
 class TestSubtitlePronunciationRestore(unittest.TestCase):
     def setUp(self):
         ML._shared_loader = None
@@ -204,6 +217,23 @@ class TestSubtitlePronunciationRestore(unittest.TestCase):
         self.assertNotIn("SPECIAL_TOKEN", subtitle)
         self.assertNotIn("ZHAO1", subtitle)
         self.assertIn("长朝夕", subtitle)
+
+    def test_glossary_injected_annotation_is_restored_to_the_term(self):
+        """术语表读法里带 <文字|读音> 时，替换产生的 token 也要还原成术语本身。"""
+        tts = GlossaryAnnotatedTTS()
+        tts.text_process.term_glossary = {"朝": "<朝|zhao1>"}
+        _, _, subtitle = self._run(tts, text="一束朝阳。")
+        self.assertNotIn("SPECIAL_TOKEN", subtitle)
+        self.assertNotIn("ZHAO1", subtitle)
+        self.assertIn("一束朝阳", subtitle)
+
+    def test_bare_pinyin_glossary_shows_pinyin_in_subtitle(self):
+        """裸拼音只是文本替换，字幕如实展示 —— 这正是提示改用标注形式的原因。"""
+        tts = GlossaryAnnotatedTTS()
+        tts.text_process.term_glossary = {"朝": "zhao1"}
+        _, _, subtitle = self._run(tts, text="一束朝阳。")
+        self.assertNotIn("SPECIAL_TOKEN", subtitle)
+        self.assertIn("一束zhao1阳", subtitle)
 
     def test_english_annotation_keeps_users_original_casing(self):
         tts = AnnotatedTTS()

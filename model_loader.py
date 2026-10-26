@@ -7,6 +7,7 @@
 """
 import os
 import gc
+import re
 import sys
 import tempfile
 import threading
@@ -82,8 +83,20 @@ class IndexTTS2_5Loader:
             )
 
     # ---- 术语表（glossary）--------------------------------------------------
-    @staticmethod
-    def _normalize_glossary(data, source):
+    # 上游的词表里没有「拼音+声调」这种 token：把中文词直接替换成裸拼音（朝 -> zhao1）
+    # 只会让模型逐字母拼读，所以要提示改用 <文字|读音> 标注形式。
+    _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+    _BARE_PINYIN_RE = re.compile(r"^(?:[a-zü]+[1-5])+$")
+
+    @classmethod
+    def _looks_like_bare_pinyin(cls, term, reading):
+        """仅当术语本身是中文、读法是纯「拼音+声调」串时才判定为误用。"""
+        if not cls._CJK_RE.search(term):
+            return False
+        return bool(cls._BARE_PINYIN_RE.match(reading.strip().lower().replace(" ", "")))
+
+    @classmethod
+    def _normalize_glossary(cls, data, source):
         """校验并规范化术语字典，忽略结构不合法的条目。"""
         terms = {}
         if not isinstance(data, dict):
@@ -94,14 +107,23 @@ class IndexTTS2_5Loader:
                 continue
             if isinstance(value, str):
                 terms[key] = value
+                readings = [value]
             elif isinstance(value, dict):
-                readings = {k: v for k, v in value.items() if isinstance(k, str) and isinstance(v, str)}
-                if readings:
-                    terms[key] = readings
-                else:
+                per_lang = {k: v for k, v in value.items()
+                            if isinstance(k, str) and isinstance(v, str)}
+                if not per_lang:
                     print(f"[IndexTTS-2.5] {source}: 术语 {key} 的读法不是字符串字典，已忽略")
+                    continue
+                terms[key] = per_lang
+                readings = list(per_lang.values())
             else:
                 print(f"[IndexTTS-2.5] {source}: 术语 {key} 的值类型不支持，已忽略")
+                continue
+            for reading in readings:
+                if cls._looks_like_bare_pinyin(key, reading):
+                    print(f"[IndexTTS-2.5] {source}: 术语 {key} 的读法 {reading!r} 是裸拼音，"
+                          f"模型不会按拼音读（词表无此 token），建议写成 <{key}|{reading}>。")
+                    break
         return terms
 
     def _read_glossary_file(self):

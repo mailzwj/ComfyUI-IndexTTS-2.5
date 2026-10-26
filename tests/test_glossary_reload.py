@@ -103,6 +103,43 @@ class TestGlossaryReload(unittest.TestCase):
 
         self.assertEqual(self.loader.refresh_glossary(Bare()), 0)
 
+    def test_bare_pinyin_is_detected_only_for_chinese_terms(self):
+        looks = ML.IndexTTS2_5Loader._looks_like_bare_pinyin
+        self.assertTrue(looks("朝", "zhao1"))
+        self.assertTrue(looks("朝", "ZHAO 1"))
+        self.assertTrue(looks("重", "chong2"))
+        # 不是拼音串：不该误报
+        self.assertFalse(looks("朝", "招"))
+        self.assertFalse(looks("朝", "M 二"))
+        self.assertFalse(looks("GPT", "GPT4"))      # 英文术语 + 版本号
+        self.assertFalse(looks("朝", "zhao"))       # 没声调
+        self.assertFalse(looks("Ok", "zhao1"))      # 术语本身不是中文
+
+    def test_bare_pinyin_entry_is_still_loaded_with_hint(self):
+        """只提示，不改变行为：用户确实可以这么写（模型会逐字母拼读）。"""
+        import io
+        import contextlib
+
+        self._write("朝: zhao1\n")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            count = self.loader.refresh_glossary(self.tts)
+        self.assertEqual(count, 1)
+        self.assertEqual(self.tts.text_process.term_glossary["朝"], "zhao1")
+        self.assertIn("裸拼音", buf.getvalue())
+        self.assertIn("<朝|zhao1>", buf.getvalue())
+
+    def test_annotated_reading_gets_no_hint(self):
+        """正确写法（读法里带 <文字|读音>）不该被提醒。"""
+        import io
+        import contextlib
+
+        self._write("朝: <朝|zhao1>\n")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.loader.refresh_glossary(self.tts)
+        self.assertNotIn("裸拼音", buf.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

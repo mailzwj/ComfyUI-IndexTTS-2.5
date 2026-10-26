@@ -300,9 +300,11 @@ class IndexTTS2_5Node:
         return waveform, durations
 
     @staticmethod
-    def _pronunciation_mapping(text):
-        """{上游标注后的形式: 用户原词}，用于把字幕里的 token 还原成可读文本。
+    def _pronunciation_mapping(text, glossary=None):
+        """{上游标注后的形式: 应显示的原词}，用于把字幕里的 token 还原成可读文本。
 
+        标注有两个来源：正文里用户手写的 ``<文字|读音>``，以及术语表读法里内嵌的标注
+        （``朝: <朝|zhao1>`` 这种写法会让替换结果带着 token 进来）。
         直接复用上游的 ``apply_pronunciation_annotations``（规则会随版本变，复刻一次
         就漂移一次）；该模块在 get_tts() 后必然已在 sys.modules 中，这里不再 import。
         上游会在标注前对文本做大小写归一，所以三种大小写都登记一次。
@@ -311,14 +313,22 @@ class IndexTTS2_5Node:
                            "apply_pronunciation_annotations", None)
         if not callable(annotate):
             return {}
-        mapping = {}
+
+        sources = []
         for word, pron in subtitles.PRONUNCIATION_TAG_RE.findall(text or ""):
-            for tag in {f"<{word}|{pron}>",
-                        f"<{word.lower()}|{pron.lower()}>",
-                        f"<{word.upper()}|{pron.upper()}>"}:
-                annotated = annotate(tag)
-                if annotated and annotated != tag:
-                    mapping.setdefault(annotated, word)
+            sources.append((f"<{word}|{pron}>", word))
+        for term, reading in (glossary or {}).items():
+            readings = reading.values() if isinstance(reading, dict) else [reading]
+            for item in readings:
+                if isinstance(item, str) and "<" in item:
+                    sources.append((item, term))
+
+        mapping = {}
+        for source, display in sources:
+            for variant in {source, source.lower(), source.upper()}:
+                annotated = annotate(variant)
+                if annotated and annotated != variant:
+                    mapping.setdefault(annotated, display)
         return mapping
 
     # ---- 主函数 ------------------------------------------------------------
@@ -429,7 +439,8 @@ class IndexTTS2_5Node:
                 print(f"[IndexTTS-2.5][警告] {hint}")
 
             # 字幕展示用可读文本：把发音标注的产物（<|SPECIAL_TOKEN_*|>读音）还原成原词
-            pron_map = self._pronunciation_mapping(text)
+            pron_map = self._pronunciation_mapping(
+                text, getattr(getattr(tts, "text_process", None), "term_glossary", None))
             if segment_texts is not None:
                 segment_texts = [subtitles.clean_pronunciation_markers(seg, pron_map)
                                  for seg in segment_texts]
