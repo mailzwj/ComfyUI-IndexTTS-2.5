@@ -8,13 +8,26 @@
 """
 import ast
 import os
+import re
 import unittest
 
 NODE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INFER_25 = os.path.join(NODE_ROOT, "indextts", "infer_v2_5.py")
 FRONT = os.path.join(NODE_ROOT, "indextts", "utils", "front.py")
-SOURCE = open(INFER_25, encoding="utf-8").read()
-FRONT_SOURCE = open(FRONT, encoding="utf-8").read()
+def _read(path):
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
+SOURCE = _read(INFER_25)
+FRONT_SOURCE = _read(FRONT)
+
+# 被说话人条件缓存快照的那批张量（见 model_loader.SPK_TENSOR_ATTRS / EMO_TENSOR_ATTRS）
+_CONDITION_ATTRS = ("cache_spk_cond", "cache_s2mel_style", "cache_s2mel_prompt",
+                    "cache_mel", "cache_emo_cond")
+_CONDITION_USE_RE = re.compile(
+    r"self\.(" + "|".join(_CONDITION_ATTRS) + r")\b(.*)$", re.MULTILINE)
+_INPLACE_MUTATORS = ("[", ".copy_", ".add_", ".mul_", ".zero_", ".data")
 
 
 def _count(literal, text=SOURCE):
@@ -23,7 +36,7 @@ def _count(literal, text=SOURCE):
 
 
 def _func_args(name, path=INFER_25):
-    tree = ast.parse(open(path, encoding="utf-8").read())
+    tree = ast.parse(_read(path))
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
             return node.args
@@ -84,6 +97,20 @@ class TestInferGeneratorContract(unittest.TestCase):
         """上游按参考音频「路径字符串」命中缓存：稳定路径才谈得上复用。"""
         self.assertIn("if self.cache_spk_cond is None or self.cache_spk_audio_prompt "
                       "!= spk_audio_prompt:", SOURCE)
+
+    def test_condition_tensors_are_never_mutated_in_place(self):
+        """说话人条件缓存的前提：上游对这些张量只整体赋值或只读，从不就地改。
+
+        同一份张量会被回填给多个角色复用，一旦出现 ``self.cache_spk_cond[...] = ...``
+        这类就地修改，就会串音色。上游升版改成就地写入时，本条要先失败。
+        """
+        for match in _CONDITION_USE_RE.finditer(SOURCE):
+            tail = match.group(2)
+            if tail.lstrip().startswith("="):  # 整体重新赋值（含置 None）
+                continue
+            self.assertFalse(
+                any(token in tail for token in _INPLACE_MUTATORS),
+                f"上游就地改写了条件张量：{match.group(0).strip()}")
 
     def test_emo_text_falls_back_to_main_text(self):
         self.assertIn("emo_text = text  # use main text prompt", SOURCE)

@@ -11,6 +11,7 @@ import re
 import sys
 import tempfile
 import threading
+from collections import OrderedDict
 
 import numpy as np
 import torch
@@ -177,6 +178,101 @@ class IndexTTS2_5Loader:
         print(f"[IndexTTS-2.5] 术语表已生效：文件 {len(base)} 条 + 节点 {len(inline)} 条")
         return len(merged)
 
+    # ---- 说话人条件缓存 ------------------------------------------------------
+    # 上游只按「参考音频路径字符串」判断能否复用条件（infer_v2_5.py 里的
+    # cache_spk_audio_prompt / cache_emo_audio_prompt 比较），路径一变就重算
+    # wav2vbert + s2mel + campplus 并 torch.cuda.empty_cache()。多人对话里角色
+    # 来回切换 = 每句都重算一次，所以这里按音频内容做两层快照（说话人 / 情感各自
+    # 一套键）：turn 前回填、turn 后抓取。回填时把路径写成本次的临时路径，
+    # 上游的比较就会命中。分开缓存是因为只换情感参考时，说话人条件不该跟着重算。
+    # 前提：上游只读这些条件张量（merge_emovec / inference_speech 都不原地改写），
+    # 否则跨角色共享快照会串音色——tests/test_upstream_contract.py 里钉了这条契约。
+    SPK_TENSOR_ATTRS = (
+        "cache_spk_cond", "cache_s2mel_style", "cache_s2mel_prompt", "cache_mel",
+    )
+    EMO_TENSOR_ATTRS = ("cache_emo_cond",)
+    SPEAKER_CACHE_CAPACITY = 6
+
+    @staticmethod
+    def wav_fingerprint(path) -> str:
+        """按文件内容生成指纹（临时文件路径每次不同，内容相同）。"""
+        import hashlib
+
+        digest = hashlib.sha1()
+        try:
+            with open(path, "rb") as f:
+                for block in iter(lambda: f.read(1024 * 1024), b""):
+                    digest.update(block)
+        except OSError:
+            return f"path:{os.path.abspath(path)}"
+        return digest.hexdigest()
+
+    def speaker_cache_key(self, tts, spk_path, emo_path) -> tuple:
+        """(说话人指纹, 情感参考指纹)；情感为空时上游用说话人音频，这里同一语义。"""
+        spk_fp = self.wav_fingerprint(spk_path)
+        emo_fp = self.wav_fingerprint(emo_path) if emo_path else spk_fp
+        return (spk_fp, emo_fp)
+
+    @staticmethod
+    def _cache_bucket(tts, attr) -> "OrderedDict | None":
+        cache = getattr(tts, attr, None)
+        if isinstance(cache, OrderedDict):
+            return cache
+        cache = OrderedDict()
+        try:
+            setattr(tts, attr, cache)
+        except Exception:  # noqa: BLE001 - 挂不上就不缓存
+            return None
+        return cache
+
+    def bind_speaker_conditions(self, tts, cache_key, spk_path, emo_path) -> bool:
+        """回填快照，返回说话人条件是否命中。
+
+        情感条件没命中时把 cache_emo_cond 置空，让上游只重算情感那半部分。
+        """
+        spk_fp, emo_fp = cache_key
+        spk_cache = getattr(tts, "_it25_spk_cache", None)
+        snapshot = spk_cache.get(spk_fp) if spk_cache else None
+        if snapshot is None:
+            return False
+        for attr, value in snapshot.items():
+            setattr(tts, attr, value)
+        tts.cache_spk_audio_prompt = spk_path
+        spk_cache.move_to_end(spk_fp)
+
+        emo_cache = getattr(tts, "_it25_emo_cache", None)
+        emo_snapshot = emo_cache.get(emo_fp) if emo_cache else None
+        if emo_snapshot is not None:
+            tts.cache_emo_cond = emo_snapshot["cache_emo_cond"]
+            tts.cache_emo_audio_prompt = emo_path or spk_path
+            emo_cache.move_to_end(emo_fp)
+        else:
+            tts.cache_emo_cond = None
+        return True
+
+    def store_speaker_conditions(self, tts, cache_key) -> None:
+        """抓取 tts 当前的条件张量存进 LRU；缺说话人条件时整条都不缓存。"""
+        if getattr(tts, "cache_spk_cond", None) is None:
+            return
+        spk_fp, emo_fp = cache_key
+        spk_cache = self._cache_bucket(tts, "_it25_spk_cache")
+        if spk_cache is None:
+            return
+        spk_cache[spk_fp] = {attr: getattr(tts, attr, None)
+                             for attr in self.SPK_TENSOR_ATTRS}
+        spk_cache.move_to_end(spk_fp)
+        while len(spk_cache) > self.SPEAKER_CACHE_CAPACITY:
+            del spk_cache[next(iter(spk_cache))]
+
+        if getattr(tts, "cache_emo_cond", None) is not None:
+            emo_cache = self._cache_bucket(tts, "_it25_emo_cache")
+            if emo_cache is not None:
+                emo_cache[emo_fp] = {attr: getattr(tts, attr)
+                                     for attr in self.EMO_TENSOR_ATTRS}
+                emo_cache.move_to_end(emo_fp)
+                while len(emo_cache) > self.SPEAKER_CACHE_CAPACITY:
+                    del emo_cache[next(iter(emo_cache))]
+
     def get_tts(self, use_bf16=True, use_qwen_emo=False):
         """返回缓存的 IndexTTS2 实例（按关键参数区分缓存）。
 
@@ -304,6 +400,13 @@ class IndexTTS2_5Loader:
                 if hasattr(tts, attr):
                     setattr(tts, attr, None)
             except Exception:  # noqa: BLE001 - 单个属性失败不影响整体释放
+                pass
+        # 说话人条件快照缓存随实例一起归还，否则释放后显存仍被缓存钉住
+        for attr in ("_it25_spk_cache", "_it25_emo_cache"):
+            try:
+                if getattr(tts, attr, None) is not None:
+                    setattr(tts, attr, None)
+            except Exception:  # noqa: BLE001
                 pass
 
     @staticmethod

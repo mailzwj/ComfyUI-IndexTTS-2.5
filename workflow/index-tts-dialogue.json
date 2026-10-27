@@ -1,0 +1,671 @@
+{
+ "id": "00000000-0000-4000-8000-000000000001",
+ "revision": 0,
+ "last_node_id": 11,
+ "last_link_id": 11,
+ "nodes": [
+  {
+   "id": 1,
+   "type": "LoadAudio",
+   "pos": [
+    -780,
+    60
+   ],
+   "size": [
+    320,
+    130
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "audioUI",
+     "type": "AUDIOUI",
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "name": "AUDIO",
+     "type": "AUDIO",
+     "links": [
+      1
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "AUDIOUI",
+     "type": "AUDIOUI",
+     "links": [],
+     "slot_index": 1
+    }
+   ],
+   "properties": {
+    "NodeName": "LoadAudio"
+   },
+   "widgets_values": [
+    "snow_ref.wav",
+    ""
+   ]
+  },
+  {
+   "id": 4,
+   "type": "IndexTTSSpeakerNode",
+   "pos": [
+    -400,
+    60
+   ],
+   "size": [
+    320,
+    220
+   ],
+   "flags": {},
+   "order": 1,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "reference_audio",
+     "type": "AUDIO",
+     "link": 1
+    },
+    {
+     "name": "emo_ref_audio",
+     "type": "AUDIO",
+     "link": null,
+     "shape": 7
+    }
+   ],
+   "outputs": [
+    {
+     "name": "speaker",
+     "type": "SPEAKER",
+     "links": [
+      4
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "NodeName": "IndexTTSSpeakerNode"
+   },
+   "widgets_values": [
+    "小雪",
+    "inherit",
+    1.0,
+    "",
+    ""
+   ]
+  },
+  {
+   "id": 2,
+   "type": "LoadAudio",
+   "pos": [
+    -780,
+    260
+   ],
+   "size": [
+    320,
+    130
+   ],
+   "flags": {},
+   "order": 2,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "audioUI",
+     "type": "AUDIOUI",
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "name": "AUDIO",
+     "type": "AUDIO",
+     "links": [
+      2
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "AUDIOUI",
+     "type": "AUDIOUI",
+     "links": [],
+     "slot_index": 1
+    }
+   ],
+   "properties": {
+    "NodeName": "LoadAudio"
+   },
+   "widgets_values": [
+    "aming_ref.wav",
+    ""
+   ]
+  },
+  {
+   "id": 5,
+   "type": "IndexTTSSpeakerNode",
+   "pos": [
+    -400,
+    260
+   ],
+   "size": [
+    320,
+    220
+   ],
+   "flags": {},
+   "order": 3,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "reference_audio",
+     "type": "AUDIO",
+     "link": 2
+    },
+    {
+     "name": "emo_ref_audio",
+     "type": "AUDIO",
+     "link": null,
+     "shape": 7
+    }
+   ],
+   "outputs": [
+    {
+     "name": "speaker",
+     "type": "SPEAKER",
+     "links": [
+      5
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "NodeName": "IndexTTSSpeakerNode"
+   },
+   "widgets_values": [
+    "阿明",
+    "inherit",
+    1.0,
+    "高兴",
+    ""
+   ]
+  },
+  {
+   "id": 3,
+   "type": "LoadAudio",
+   "pos": [
+    -780,
+    460
+   ],
+   "size": [
+    320,
+    130
+   ],
+   "flags": {},
+   "order": 4,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "audioUI",
+     "type": "AUDIOUI",
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "name": "AUDIO",
+     "type": "AUDIO",
+     "links": [
+      3
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "AUDIOUI",
+     "type": "AUDIOUI",
+     "links": [],
+     "slot_index": 1
+    }
+   ],
+   "properties": {
+    "NodeName": "LoadAudio"
+   },
+   "widgets_values": [
+    "narrator_ref.wav",
+    ""
+   ]
+  },
+  {
+   "id": 6,
+   "type": "IndexTTSSpeakerNode",
+   "pos": [
+    -400,
+    460
+   ],
+   "size": [
+    320,
+    220
+   ],
+   "flags": {},
+   "order": 5,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "reference_audio",
+     "type": "AUDIO",
+     "link": 3
+    },
+    {
+     "name": "emo_ref_audio",
+     "type": "AUDIO",
+     "link": null,
+     "shape": 7
+    }
+   ],
+   "outputs": [
+    {
+     "name": "speaker",
+     "type": "SPEAKER",
+     "links": [
+      6
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "NodeName": "IndexTTSSpeakerNode"
+   },
+   "widgets_values": [
+    "旁白",
+    "inherit",
+    1.0,
+    "",
+    ""
+   ]
+  },
+  {
+   "id": 7,
+   "type": "IndexTTSSpeakerPackNode",
+   "pos": [
+    -20,
+    140
+   ],
+   "size": [
+    280,
+    200
+   ],
+   "flags": {},
+   "order": 6,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "prev_pack",
+     "type": "SPEAKER_PACK",
+     "link": null,
+     "shape": 7
+    },
+    {
+     "name": "s1",
+     "type": "SPEAKER",
+     "link": 4,
+     "shape": 7
+    },
+    {
+     "name": "s2",
+     "type": "SPEAKER",
+     "link": 5,
+     "shape": 7
+    },
+    {
+     "name": "s3",
+     "type": "SPEAKER",
+     "link": 6,
+     "shape": 7
+    },
+    {
+     "name": "s4",
+     "type": "SPEAKER",
+     "link": null,
+     "shape": 7
+    },
+    {
+     "name": "s5",
+     "type": "SPEAKER",
+     "link": null,
+     "shape": 7
+    },
+    {
+     "name": "s6",
+     "type": "SPEAKER",
+     "link": null,
+     "shape": 7
+    },
+    {
+     "name": "s7",
+     "type": "SPEAKER",
+     "link": null,
+     "shape": 7
+    },
+    {
+     "name": "s8",
+     "type": "SPEAKER",
+     "link": null,
+     "shape": 7
+    }
+   ],
+   "outputs": [
+    {
+     "name": "speakers",
+     "type": "SPEAKER_PACK",
+     "links": [
+      7
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "NodeName": "IndexTTSSpeakerPackNode"
+   },
+   "widgets_values": []
+  },
+  {
+   "id": 8,
+   "type": "IndexTTSSettingsNode",
+   "pos": [
+    -20,
+    420
+   ],
+   "size": [
+    320,
+    420
+   ],
+   "flags": {},
+   "order": 7,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "options",
+     "type": "TTS_OPTIONS",
+     "links": [
+      8
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "NodeName": "IndexTTSSettingsNode"
+   },
+   "widgets_values": [
+    true,
+    0.8,
+    0.8,
+    30,
+    10.0,
+    0.0,
+    3,
+    1500,
+    120,
+    false,
+    true,
+    "",
+    1.0,
+    false
+   ]
+  },
+  {
+   "id": 9,
+   "type": "IndexTTSDialogueNode",
+   "pos": [
+    380,
+    140
+   ],
+   "size": [
+    440,
+    560
+   ],
+   "flags": {},
+   "order": 8,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "speakers",
+     "type": "SPEAKER_PACK",
+     "link": 7
+    },
+    {
+     "name": "options",
+     "type": "TTS_OPTIONS",
+     "link": 8,
+     "shape": 7
+    }
+   ],
+   "outputs": [
+    {
+     "name": "audio",
+     "type": "AUDIO",
+     "links": [
+      9
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "seed",
+     "type": "INT",
+     "links": [],
+     "slot_index": 1
+    },
+    {
+     "name": "subtitle",
+     "type": "STRING",
+     "links": [
+      10
+     ],
+     "slot_index": 2
+    },
+    {
+     "name": "report",
+     "type": "STRING",
+     "links": [
+      11
+     ],
+     "slot_index": 3
+    }
+   ],
+   "properties": {
+    "NodeName": "IndexTTSDialogueNode"
+   },
+   "widgets_values": [
+    "小雪: 你终于来了。\n阿明（高兴）: 给你带了杯咖啡！\n  还是冰的，路上没化。\n小雪: 谢谢。\n[旁白] @lang=zh @speed=0.9: 走廊尽头的窗户开着一条缝。",
+    "zh",
+    450,
+    200,
+    200,
+    0,
+    "srt",
+    "synthesized",
+    true,
+    "【{name}】",
+    true,
+    true,
+    false
+   ]
+  },
+  {
+   "id": 10,
+   "type": "PreviewAudio",
+   "pos": [
+    860,
+    140
+   ],
+   "size": [
+    320,
+    100
+   ],
+   "flags": {},
+   "order": 9,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "audio",
+     "type": "AUDIO",
+     "shape": 7,
+     "link": 9
+    }
+   ],
+   "outputs": [],
+   "properties": {
+    "NodeName": "PreviewAudio"
+   },
+   "widgets_values": [
+    0.0
+   ]
+  },
+  {
+   "id": 11,
+   "type": "ShowText|pysssss",
+   "pos": [
+    860,
+    320
+   ],
+   "size": [
+    380,
+    220
+   ],
+   "flags": {},
+   "order": 10,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "text",
+     "type": "STRING",
+     "link": 10
+    },
+    {
+     "name": "text1",
+     "type": "STRING",
+     "shape": 7,
+     "link": 11
+    },
+    {
+     "name": "text2",
+     "type": "STRING",
+     "shape": 7,
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "name": "STRING",
+     "type": "STRING",
+     "links": [],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "NodeName": "ShowText|pysssss"
+   },
+   "widgets_values": [
+    ""
+   ]
+  }
+ ],
+ "links": [
+  [
+   1,
+   1,
+   0,
+   4,
+   0,
+   "AUDIO"
+  ],
+  [
+   2,
+   2,
+   0,
+   5,
+   0,
+   "AUDIO"
+  ],
+  [
+   3,
+   3,
+   0,
+   6,
+   0,
+   "AUDIO"
+  ],
+  [
+   4,
+   4,
+   0,
+   7,
+   1,
+   "SPEAKER"
+  ],
+  [
+   5,
+   5,
+   0,
+   7,
+   2,
+   "SPEAKER"
+  ],
+  [
+   6,
+   6,
+   0,
+   7,
+   3,
+   "SPEAKER"
+  ],
+  [
+   7,
+   7,
+   0,
+   9,
+   0,
+   "SPEAKER_PACK"
+  ],
+  [
+   8,
+   8,
+   0,
+   9,
+   1,
+   "TTS_OPTIONS"
+  ],
+  [
+   9,
+   9,
+   0,
+   10,
+   0,
+   "AUDIO"
+  ],
+  [
+   10,
+   9,
+   2,
+   11,
+   0,
+   "STRING"
+  ],
+  [
+   11,
+   9,
+   3,
+   11,
+   1,
+   "STRING"
+  ]
+ ],
+ "groups": [],
+ "config": {},
+ "extra": {
+  "workflow_info": {
+   "content": "IndexTTS-2.5 多人对话示例：三个角色（含旁白）、逐 turn 停顿分档、带角色名字幕。"
+  }
+ },
+ "version": 1
+}

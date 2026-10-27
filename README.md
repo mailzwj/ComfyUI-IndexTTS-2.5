@@ -25,7 +25,8 @@ IndexTTS-2.5 的 ComfyUI 自定义节点。零样本文本转语音，支持中�
 
 ### 工作流预览
 
-![Index TTS 2.5 工作流](preview.png)
+#### 普通音色克隆
+![Index TTS 2.5 工作流](assets/preview.png)
 
 参考音频：
 
@@ -34,6 +35,12 @@ IndexTTS-2.5 的 ComfyUI 自定义节点。零样本文本转语音，支持中�
 生成结果：
 
 <audio controls src="example/result.wav"></audio>
+
+#### 多人对话
+![Index TTS 2.5 多人对话](assets/multi-speakers.png)
+参考结果：
+
+<audio controls src="example/multi.wav"></audio>
 
 ## 使用说明
 

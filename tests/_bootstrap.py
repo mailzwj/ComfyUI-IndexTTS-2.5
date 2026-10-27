@@ -7,10 +7,12 @@ import importlib.util
 import os
 import sys
 import types
+import unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODULE_NAMES = ("model_loader", "subtitles", "text_tools", "nodes")
+MODULE_NAMES = ("model_loader", "subtitles", "text_tools", "engine",
+                "dialogue_script", "nodes", "nodes_dialogue")
 
 
 def load_pkg():
@@ -38,6 +40,9 @@ ML = PKG.model_loader
 NODES = PKG.nodes
 SUB = PKG.subtitles
 TT = PKG.text_tools
+EN = PKG.engine
+DS = PKG.dialogue_script
+ND = PKG.nodes_dialogue
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
@@ -125,3 +130,37 @@ def make_fake_loader(tts):
     loader.refresh_glossary.side_effect = lambda *args, **kwargs: 0
     loader.get_tts.return_value = tts
     return loader
+
+
+def make_stateful_loader(tts):
+    """真实 loader 实例（只把 get_tts/refresh_glossary 打桩）。
+
+    说话人条件缓存这类「有状态」逻辑必须由真实现跑，MagicMock 会把返回值
+    变成真值对象，测不出命中/回填是否正确。
+    """
+    loader = ML.IndexTTS2_5Loader(models_root=ROOT, device="cpu")
+    loader.get_tts = lambda **kwargs: tts
+    loader.refresh_glossary = lambda *args, **kwargs: 0
+    return loader
+
+
+SR = 22050
+
+
+class VoiceFactoryMixin(unittest.TestCase):
+    """为对话节点造多角色 pack：每个角色的参考音频内容互不相同。
+
+    内容不同才谈得上「按内容指纹命中缓存」；level 决定波形的采样值。
+    """
+
+    def voice(self, name, level, language="inherit", duration_factor=None,
+              emo_text="", emo_vector="", emo_ref_audio=None):
+        wave = torch.full((1, 1, SR // 10), float(level) / 100.0)
+        return ND.Voice(name=name, audio={"waveform": wave, "sample_rate": SR},
+                        language=language, duration_factor=duration_factor,
+                        emo_text=emo_text, emo_vector=emo_vector,
+                        emo_ref_audio=emo_ref_audio)
+
+    def pack(self, *specs):
+        return {v.name: v for v in (self.voice(*spec) for spec in specs)}
+

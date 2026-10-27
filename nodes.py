@@ -3,22 +3,14 @@
 参考 ComfyUI-Index-TTS 的节点设计，适配 IndexTTS-2.5 的官方 API
 （indextts.infer_v2_5.IndexTTS2.infer_generator）。
 """
-import json
 import os
-import random
-import sys
-import threading
-import warnings
 
-import numpy as np
-import torch
-
-from . import subtitles, text_tools
+from . import engine, subtitles, text_tools
 from .model_loader import get_shared_loader
 
 # 生成期间会对共享的 tts 实例打补丁（分段记录、进度钩子），必须串行执行。
 # GPU 推理本身即串行，因此不会损失吞吐。
-_GEN_LOCK = threading.Lock()
+_GEN_LOCK = engine.GEN_LOCK
 
 
 class IndexTTS2_5Node:
@@ -119,6 +111,12 @@ class IndexTTS2_5Node:
                                "适合需要把显存腾给图像/视频等其它模型的场景；\n"
                                "不勾选（默认）：模型常驻 GPU，连续多次生成更快。",
                 }),
+                "speaker_cache": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "按参考音频内容缓存说话人/情感条件张量（LRU 6 份）：\n"
+                               "同一音色再次生成时跳过 wav2vbert + s2mel + campplus 提特征，多人对话交替角色时提速最明显。\n"
+                               "关闭可腾出这部分显存；模型卸载（auto_free_memory）时缓存随之释放。",
+                }),
             },
         }
 
@@ -132,204 +130,32 @@ class IndexTTS2_5Node:
         # 避免重复加载整套模型导致显存成倍增长。
         self.loader = get_shared_loader()
 
-    # ---- 输入处理 ----------------------------------------------------------
+    # ---- 输入处理（实现见 engine.py，这里保留方法名作为可 patch 的入口）------
     @staticmethod
     def _process_audio_input(audio):
-        """把 ComfyUI AUDIO 输入转成 (wave_1d_float32, sr)。"""
-        if isinstance(audio, dict) and "waveform" in audio and "sample_rate" in audio:
-            wave = audio["waveform"]
-            sr = int(audio["sample_rate"])
-            if isinstance(wave, torch.Tensor):
-                if wave.dim() == 3:
-                    wave = wave[0, 0].detach().cpu().numpy()
-                elif wave.dim() == 1:
-                    wave = wave.detach().cpu().numpy()
-                else:
-                    wave = wave.flatten().detach().cpu().numpy()
-            elif isinstance(wave, np.ndarray):
-                if wave.ndim == 3:
-                    wave = wave[0, 0]
-                elif wave.ndim == 2:
-                    wave = wave[0]
-            return wave.astype(np.float32), sr
-        if isinstance(audio, tuple) and len(audio) == 2:
-            wave, sr = audio
-            if isinstance(wave, torch.Tensor):
-                wave = wave.detach().cpu().numpy()
-            return np.asarray(wave, dtype=np.float32), int(sr)
-        raise ValueError("reference_audio 必须是 AUDIO 类型")
+        return engine.process_audio_input(audio)
 
     @classmethod
     def _parse_emo_vector(cls, raw):
-        """解析情感向量：逗号分隔或 JSON 数组，返回 8 维 list 或 None。"""
-        if raw is None:
-            return None
-        raw = str(raw).strip()
-        if not raw:
-            return None
-        try:
-            if raw.startswith("["):
-                vals = json.loads(raw)
-            else:
-                vals = [x.strip() for x in raw.split(",") if x.strip() != ""]
-                vals = [float(x) for x in vals]
-        except Exception:
-            return None
-        vals = [float(x) for x in vals]
-        if len(vals) != 8:
-            return None
-        return vals
+        return engine.parse_emo_vector(raw)
 
     # ---- 流式合成 -----------------------------------------------------------
     @staticmethod
-    def _segment_to_int16(item):
-        """上游流式产出的是 ±32767 量级的 float 张量，转成一维 int16。"""
-        tensor = item.detach().float().flatten()
-        tensor = torch.clamp(tensor, -32767.0, 32767.0).to(torch.int16)
-        return tensor.numpy()
-
-    @staticmethod
     def _make_progress_hook():
-        """把上游的 gr_progress 回调桥接到 ComfyUI 进度条；不可用时返回 None。"""
-        try:
-            from comfy.utils import ProgressBar
-        except Exception:  # noqa: BLE001 - 单测/离线环境没有 comfy 包
-            return None
-        try:
-            bar = ProgressBar(1000)
-        except Exception:  # noqa: BLE001
-            return None
+        return engine.make_progress_hook()
 
-        def hook(value=0.0, desc=None):
-            try:
-                ratio = max(0.0, min(1.0, float(value)))
-                bar.update_absolute(int(round(ratio * 1000)))
-            except Exception:  # noqa: BLE001 - 进度显示失败不影响生成
-                pass
-            if desc:
-                print(f"[IndexTTS-2.5] {desc}")
-
-        return hook
-
-    def _synthesize_segments(self, tts, spk_path, emo_path, text, language, infer_options):
-        """逐段消费上游生成器，返回 (段音频列表, 段文本列表或 None, 是否被截断)。
-
-        非流式 infer() 只会返回拼接好的整段音频，拿不到分段时长；这里走
-        infer_generator(stream_return=True)，每合成完一段就 yield 一次，
-        并临时记录 split_text_by_tokens 的返回值，得到「文本 <-> 音频」配对。
-        """
-        captured = []
-        splitter = getattr(tts, "split_text_by_tokens", None)
-        original_splitter = splitter
-        record = None
-        if callable(splitter):
-            def record(seg_text, max_tokens, lang_prefix=""):
-                segments = original_splitter(seg_text, max_tokens, lang_prefix)
-                captured.append(list(segments))
-                return segments
-            tts.split_text_by_tokens = record
-
-        previous_hook = getattr(tts, "gr_progress", None)
-        hook = self._make_progress_hook()
-        if hook is not None:
-            tts.gr_progress = hook
-
-        chunks = [text]
-        low_vram = bool(getattr(tts, "low_vram", False))
-        if low_vram and len(text) > 40 and hasattr(tts, "split_text_by_punctuation"):
-            chunks = list(tts.split_text_by_punctuation(text, 40)) or [text]
-            print(f"[IndexTTS-2.5] 低显存模式：文本按标点切成 {len(chunks)} 块逐块生成")
-
-        wav_segments, segment_texts = [], []
-        try:
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                for chunk_index, chunk in enumerate(chunks):
-                    before = len(captured)
-                    gen = tts.infer_generator(
-                        spk_audio_prompt=spk_path,
-                        text=chunk,
-                        output_path=None,
-                        lang=language,
-                        # 段间静音由本节点统一插入，因此这里固定传 0，
-                        # 避免上游产出 list/张量两种形态的静音对象
-                        interval_silence=0,
-                        stream_return=True,
-                        **infer_options,
-                    )
-                    got = [self._segment_to_int16(item)
-                           for item in gen if isinstance(item, torch.Tensor)]
-                    if not got:
-                        raise RuntimeError("IndexTTS-2.5 推理未返回音频数据")
-                    wav_segments.extend(got)
-                    if before < len(captured):
-                        segment_texts.extend(captured[before])
-                    else:
-                        segment_texts.extend([""] * len(got))
-                truncated = any("max_mel_tokens" in str(w.message) for w in caught)
-        finally:
-            if record is not None:
-                try:
-                    tts.split_text_by_tokens = original_splitter
-                except Exception:  # noqa: BLE001
-                    pass
-            tts.gr_progress = previous_hook
-
-        aligned = len(segment_texts) == len(wav_segments)
-        if not aligned:
-            print(f"[IndexTTS-2.5] 分段文本捕获不一致（{len(segment_texts)} vs "
-                  f"{len(wav_segments)}），字幕退化为整段时长按字符均分")
-        return wav_segments, (segment_texts if aligned else None), truncated
-
+    def _synthesize_segments(self, tts, spk_path, emo_path, text, language,
+                             infer_options, speaker_cache=True):
+        return engine.synthesize_turn(
+            self.loader, tts, spk_path, emo_path, text, language, infer_options,
+            progress_hook=self._make_progress_hook(), speaker_cache=speaker_cache)
     @staticmethod
     def _assemble_audio(wav_segments, sample_rate, interval_silence):
-        """拼接各段并在段间插入静音，返回 (waveform_tensor, 每段时长秒数)。"""
-        durations = [len(seg) / float(sample_rate) for seg in wav_segments]
-        gap = int(sample_rate * max(0, int(interval_silence)) / 1000)
-        parts = []
-        for index, seg in enumerate(wav_segments):
-            parts.append(seg)
-            if gap and index < len(wav_segments) - 1:
-                parts.append(np.zeros(gap, dtype=np.int16))
-        if not parts:
-            waveform = torch.zeros((1, 1, 0), dtype=torch.float32)
-        else:
-            pcm = np.concatenate(parts)
-            wave_f = (pcm.astype(np.float32) / 32768.0).clip(-1.0, 1.0)
-            waveform = torch.tensor(wave_f, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-        return waveform, durations
+        return engine.assemble_audio(wav_segments, sample_rate, interval_silence)
 
     @staticmethod
     def _pronunciation_mapping(text, glossary=None):
-        """{上游标注后的形式: 应显示的原词}，用于把字幕里的 token 还原成可读文本。
-
-        标注有两个来源：正文里用户手写的 ``<文字|读音>``，以及术语表读法里内嵌的标注
-        （``朝: <朝|zhao1>`` 这种写法会让替换结果带着 token 进来）。
-        直接复用上游的 ``apply_pronunciation_annotations``（规则会随版本变，复刻一次
-        就漂移一次）；该模块在 get_tts() 后必然已在 sys.modules 中，这里不再 import。
-        上游会在标注前对文本做大小写归一，所以三种大小写都登记一次。
-        """
-        annotate = getattr(sys.modules.get("indextts.infer_v2_5"),
-                           "apply_pronunciation_annotations", None)
-        if not callable(annotate):
-            return {}
-
-        sources = []
-        for word, pron in subtitles.PRONUNCIATION_TAG_RE.findall(text or ""):
-            sources.append((f"<{word}|{pron}>", word))
-        for term, reading in (glossary or {}).items():
-            readings = reading.values() if isinstance(reading, dict) else [reading]
-            for item in readings:
-                if isinstance(item, str) and "<" in item:
-                    sources.append((item, term))
-
-        mapping = {}
-        for source, display in sources:
-            for variant in {source, source.lower(), source.upper()}:
-                annotated = annotate(variant)
-                if annotated and annotated != variant:
-                    mapping.setdefault(annotated, display)
-        return mapping
+        return engine.pronunciation_mapping(text, glossary)
 
     # ---- 主函数 ------------------------------------------------------------
     def generate(
@@ -363,6 +189,7 @@ class IndexTTS2_5Node:
         subtitle_text="synthesized",
         use_bf16=True,
         auto_free_memory=False,
+        speaker_cache=True,
     ):
         text = (text or "").strip()
         if not text:
@@ -387,36 +214,21 @@ class IndexTTS2_5Node:
             load_qwen = bool(use_qwen_emo) or use_emo_text
 
             # 设置随机种子（seed=0 时不固定，沿用全局状态）
-            if seed != 0:
-                random.seed(seed)
-                np.random.seed(seed)
-                torch.manual_seed(seed)
-                if torch.cuda.is_available():
-                    torch.cuda.manual_seed_all(seed)
+            engine.apply_seed(seed)
 
             tts = self.loader.get_tts(use_bf16=use_bf16, use_qwen_emo=load_qwen)
             self.loader.refresh_glossary(tts, glossary_yaml)
 
-            infer_options = {
-                "emo_audio_prompt": emo_path,
-                "emo_alpha": float(emo_alpha),
-                "emo_vector": emo_vec,
-                "use_emo_text": use_emo_text,
-                "emo_text": (emo_text.strip() or None) if use_emo_text else None,
-                "use_random": bool(use_random),
-                "duration_factor": float(duration_factor),
-                "text_normalization": bool(text_normalization),
-                "max_text_tokens_per_segment": int(max_text_tokens_per_segment),
-                # 采样参数
-                "do_sample": bool(do_sample),
-                "temperature": float(temperature),
-                "top_p": float(top_p),
-                "top_k": int(top_k),
-                "repetition_penalty": float(repetition_penalty),
-                "length_penalty": float(length_penalty),
-                "num_beams": int(num_beams),
-                "max_mel_tokens": int(max_mel_tokens),
-            }
+            infer_options = engine.build_infer_options(
+                duration_factor=duration_factor,
+                text_normalization=text_normalization,
+                max_text_tokens_per_segment=max_text_tokens_per_segment,
+                do_sample=do_sample, temperature=temperature, top_p=top_p,
+                top_k=top_k, repetition_penalty=repetition_penalty,
+                length_penalty=length_penalty, num_beams=num_beams,
+                max_mel_tokens=max_mel_tokens, emo_alpha=emo_alpha,
+                emo_vector=emo_vec, use_emo_text=use_emo_text,
+                emo_text=emo_text, use_random=use_random)
 
             sample_rate = self.loader.sampling_rate(tts)
             print(f"[IndexTTS-2.5] 开始推理 text_len={len(text)} lang={language} "
@@ -424,8 +236,9 @@ class IndexTTS2_5Node:
                   f"seg_tokens<= {max_text_tokens_per_segment} sr={sample_rate}")
 
             with _GEN_LOCK:
-                wav_segments, segment_texts, truncated = self._synthesize_segments(
-                    tts, spk_path, emo_path, text, language, infer_options)
+                wav_segments, segment_texts, truncated, cache_hit = self._synthesize_segments(
+                    tts, spk_path, emo_path, text, language, infer_options,
+                    speaker_cache=speaker_cache)
 
             waveform, durations = self._assemble_audio(wav_segments, sample_rate, interval_silence)
             total_duration = waveform.shape[-1] / float(sample_rate)
@@ -461,7 +274,8 @@ class IndexTTS2_5Node:
                     original_text=readable_text, subtitle_format=subtitle_format)
 
             audio_dict = {"waveform": waveform, "sample_rate": sample_rate}
-            print(f"[IndexTTS-2.5] 完成，{len(wav_segments)} 段 / 时长 {total_duration:.2f}s")
+            print(f"[IndexTTS-2.5] 完成，{len(wav_segments)} 段 / 时长 {total_duration:.2f}s"
+                  f"{'（说话人条件命中缓存）' if cache_hit else ''}")
 
             # 生成成功后按需释放模型（归还内存/显存给 ComfyUI 其它节点）
             if auto_free_memory:
